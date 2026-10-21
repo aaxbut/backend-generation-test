@@ -1,0 +1,115 @@
+# ---------------------------------------------------------------------------
+# Общие env для api / migrate / providers / tests.
+# Значения PROVIDER_TIMEOUT и PROVIDER_SYNC_TIMEOUT читаются из shell/.env,
+# чтобы `make test` мог поставить 2 секунды, а `make up` — 60.
+# ---------------------------------------------------------------------------
+x-app-env: &app-env
+  DATABASE_URL: postgresql://app:app@db:5432/app
+  PROVIDER_TIMEOUT: "${PROVIDER_TIMEOUT:-60}"
+  PROVIDER_SYNC_TIMEOUT: "${PROVIDER_SYNC_TIMEOUT:-5}"
+  MAX_ACTIVE_TASKS: "${MAX_ACTIVE_TASKS:-3}"
+  PAYMENT_WEBHOOK_SECRET: "pay-secret"
+  PROVIDER_ALPHA_SECRET: "alpha-secret"
+  PROVIDER_BETA_SECRET: "beta-secret"
+  PROVIDER_ALPHA_URL: "http://provider-alpha:9001"
+  PROVIDER_BETA_URL: "http://provider-beta:9002"
+  SERVICE_WEBHOOK_URL: "http://api:8000"
+
+services:
+  # -------------------------------------------------------------------------
+  # База. Порт наружу — для локального запуска pytest и psql.
+  # -------------------------------------------------------------------------
+  db:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: app
+      POSTGRES_PASSWORD: app
+      POSTGRES_DB: app
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U app -d app"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+
+  # -------------------------------------------------------------------------
+  # Миграции — one-shot. Запускаются ровно один раз, до старта API.
+  # `restart: "no"` + depends_on service_completed_successfully у api
+  # гарантируют, что 4 воркера не гоняются за alembic upgrade head.
+  # -------------------------------------------------------------------------
+  migrate:
+    build: .
+    command: alembic upgrade head
+    environment:
+      <<: *app-env
+      PYTHONPATH: /app
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: "no"
+
+  # -------------------------------------------------------------------------
+  # API: 4 воркера uvicorn. Сторож живёт в каждом воркере (lifespan);
+  # задвоения нет благодаря FOR UPDATE SKIP LOCKED.
+  # -------------------------------------------------------------------------
+  api:
+    build: .
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers 4
+    environment: *app-env
+    ports:
+      - "8000:8000"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8000/docs >/dev/null || exit 1"]
+      interval: 3s
+      timeout: 3s
+      retries: 40
+      start_period: 5s
+
+  # -------------------------------------------------------------------------
+  # Фейковые провайдеры. Поведение задаётся полем `behavior` в POST /tasks
+  # (его пробрасывает наш providers_client из поля behavior в /generate).
+  # Env PROVIDER_SECRET — для HMAC исходящих вебхуков.
+  # -------------------------------------------------------------------------
+  provider-alpha:
+    build: .
+    command: uvicorn fake_providers.alpha:app --host 0.0.0.0 --port 9001
+    environment:
+      <<: *app-env
+      PROVIDER_SECRET: "alpha-secret"
+    ports:
+      - "9001:9001"
+    depends_on:
+      - api
+
+  provider-beta:
+    build: .
+    command: uvicorn fake_providers.beta:app --host 0.0.0.0 --port 9002
+    environment:
+      <<: *app-env
+      PROVIDER_SECRET: "beta-secret"
+    ports:
+      - "9002:9002"
+    depends_on:
+      - api
+
+  # -------------------------------------------------------------------------
+  # Тесты. Поднимаются ТОЛЬКО через `docker compose run --rm -T tests ...`
+  # или `make test`. profiles: ["tests"] исключает их из обычного `up`.
+  # Монтируем код, чтобы правки тестов подхватывались без пересборки.
+  # -------------------------------------------------------------------------
+  tests:
+    build: .
+    environment:
+      <<: *app-env
+      SERVICE_URL: "http://api:8000"
+    volumes:
+      - .:/app
+    command: pytest -q tests
+    profiles: ["tests"]
+    depends_on:
+      api:
+        condition: service_healthy

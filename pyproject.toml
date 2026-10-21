@@ -1,0 +1,29 @@
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+src = ["app", "tests", "fake_providers"]
+extend-exclude = [
+    "alembic/versions",   # ревизии — исторические артефакты, не форматируем
+]
+
+[tool.ruff.lint]
+select = [
+    "E",   # pycodestyle errors
+    "F",   # pyflakes
+    "I",   # isort
+    "B",   # flake8-bugbear
+    "UP",  # pyupgrade
+    "SIM", # flake8-simplify
+    "ASYNC", # flake8-async — ловит sync-вызовы в async
+]
+ignore = [
+    "E501",   # длину строк держит форматтер
+    "B008",   # FastAPI Depends() в дефолтах — норма
+]
+
+[tool.ruff.lint.isort]
+known-first-party = ["app", "fake_providers", "tests"]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
